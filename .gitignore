@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+QuotaBar.app/
+.DS_Store
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
