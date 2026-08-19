@@ -8,8 +8,6 @@ struct QuotaMenuView: View {
     @State private var manualRemaining = 50.0
     @State private var manualReset = Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date()
 
-    private let refreshTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -23,8 +21,8 @@ struct QuotaMenuView: View {
         }
         .frame(width: 292)
         .background(.regularMaterial)
-        .onReceive(refreshTimer) { _ in store.refresh() }
         .onAppear {
+            store.refreshSoon()
             if let snapshot = store.currentSnapshot {
                 manualRemaining = snapshot.remainingPercent
                 manualReset = snapshot.resetAt
