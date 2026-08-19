@@ -8,7 +8,8 @@ It is designed to feel quiet and native: just a compact number in the menu bar, 
 
 - Menu bar percentage for remaining weekly usage
 - Native SwiftUI/AppKit popover with a compact Apple-style layout
-- Automatic local reading from Codex session metadata
+- Background auto-refresh while the menu bar app is running
+- Near-real-time local updates when Codex session metadata changes
 - Manual fallback when no recent usage data is available
 - Low-usage notification threshold
 - Launch-at-login toggle
@@ -53,7 +54,7 @@ On first launch, macOS may ask you to allow the app from Privacy & Security sett
 
 ## How It Works
 
-Codex records rate-limit metadata in local session files. QuotaBar scans recent session files, selects the weekly window, and displays:
+Codex records rate-limit metadata in local session files. QuotaBar watches the local sessions folder, refreshes when usage metadata changes, and also performs a quiet background refresh every 30 seconds as a fallback. It scans recent session files, selects the weekly window, and displays:
 
 - remaining percentage
 - used percentage
@@ -70,6 +71,7 @@ Sources/QuotaBar/
   QuotaMenuView.swift      popover UI
   UsageStore.swift         app state, refresh, notifications, login item
   SessionUsageReader.swift local usage metadata reader
+  SessionUsageWatcher.swift local session file change watcher
   UsageSnapshot.swift      usage model
 build-app.sh               release build and app bundle script
 Package.swift              Swift package manifest
