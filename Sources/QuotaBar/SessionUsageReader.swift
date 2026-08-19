@@ -1,6 +1,9 @@
 import Foundation
 
 enum SessionUsageReader {
+    static let sessionsDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".codex/sessions", isDirectory: true)
+
     private struct WindowCandidate {
         let usedPercent: Double
         let windowMinutes: Int
@@ -8,8 +11,6 @@ enum SessionUsageReader {
     }
 
     static func latestWeeklyUsage() -> UsageSnapshot? {
-        let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions", isDirectory: true)
         var recentFiles: [(url: URL, modified: Date)] = []
 
         // A weekly allowance cannot be affected by sessions older than two weeks.
@@ -22,7 +23,7 @@ enum SessionUsageReader {
                   let month = components.month,
                   let day = components.day else { continue }
 
-            let dayURL = sessionsURL
+            let dayURL = sessionsDirectoryURL
                 .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
                 .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
                 .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
