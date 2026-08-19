@@ -20,6 +20,7 @@ final class UsageStore: ObservableObject {
     @Published var automaticSync: Bool {
         didSet {
             defaults.set(automaticSync, forKey: Keys.automaticSync)
+            automaticSync ? startAutomaticRefresh() : stopAutomaticRefresh()
             automaticSync ? refresh() : loadManualSnapshot()
         }
     }
@@ -27,6 +28,9 @@ final class UsageStore: ObservableObject {
     private let defaults = UserDefaults.standard
     private var lastNotifiedResetAt: Date?
     private var statusClearTask: Task<Void, Never>?
+    private var refreshTimer: Timer?
+    private var refreshDebounceTask: Task<Void, Never>?
+    private var sessionUsageWatcher: SessionUsageWatcher?
 
     private enum Keys {
         static let snapshot = "savedSnapshot"
@@ -43,6 +47,7 @@ final class UsageStore: ObservableObject {
         launchAtLoginNeedsApproval = SMAppService.mainApp.status == .requiresApproval
         lastNotifiedResetAt = defaults.object(forKey: Keys.lastNotifiedResetAt) as? Date
         snapshot = Self.decode(UsageSnapshot.self, from: defaults.data(forKey: Keys.snapshot))
+        startAutomaticRefresh()
         refresh()
     }
 
@@ -120,6 +125,16 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    func refreshSoon() {
+        guard automaticSync else { return }
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            self?.refresh()
+        }
+    }
+
     func applyManual(remainingPercent: Double, resetAt: Date) {
         let manual = UsageSnapshot(
             usedPercent: 100 - remainingPercent,
@@ -177,6 +192,35 @@ final class UsageStore: ObservableObject {
         } else if snapshot == nil {
             statusMessage = "请先设置一次剩余用量"
         }
+    }
+
+    private func startAutomaticRefresh() {
+        guard automaticSync else { return }
+
+        refreshTimer?.invalidate()
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+
+        sessionUsageWatcher = SessionUsageWatcher { [weak self] in
+            Task { @MainActor in
+                self?.refreshSoon()
+            }
+        }
+        sessionUsageWatcher?.start()
+    }
+
+    private func stopAutomaticRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = nil
+        sessionUsageWatcher?.stop()
+        sessionUsageWatcher = nil
     }
 
     private func apply(_ newSnapshot: UsageSnapshot) {
