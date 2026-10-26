@@ -8,7 +8,9 @@ import UserNotifications
 final class UsageStore: ObservableObject {
     @Published private(set) var snapshot: UsageSnapshot?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var displayTick = Date()
     @Published private(set) var statusMessage: String?
+    @Published private(set) var syncIssue: String?
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published private(set) var launchAtLoginNeedsApproval: Bool
     @Published var warningThreshold: Double {
@@ -25,62 +27,68 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private var lastNotifiedResetAt: Date?
     private var statusClearTask: Task<Void, Never>?
     private var refreshTimer: Timer?
+    private var displayTimer: Timer?
     private var refreshDebounceTask: Task<Void, Never>?
     private var sessionUsageWatcher: SessionUsageWatcher?
+    private let liveUsageClient = CodexUsageClient()
 
     private enum Keys {
         static let snapshot = "savedSnapshot"
         static let manualSnapshot = "manualSnapshot"
         static let warningThreshold = "warningThreshold"
         static let automaticSync = "automaticSync"
-        static let lastNotifiedResetAt = "lastNotifiedResetAt"
+        static let lastNotifiedResetAt = "lastNotifiedFiveHourResetAt"
     }
 
-    init() {
+    init(defaults: UserDefaults = .standard, initialSnapshot: UsageSnapshot? = nil, startsServices: Bool = true) {
+        self.defaults = defaults
         warningThreshold = defaults.object(forKey: Keys.warningThreshold) as? Double ?? 20
         automaticSync = defaults.object(forKey: Keys.automaticSync) as? Bool ?? true
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
         launchAtLoginNeedsApproval = SMAppService.mainApp.status == .requiresApproval
         lastNotifiedResetAt = defaults.object(forKey: Keys.lastNotifiedResetAt) as? Date
-        snapshot = Self.decode(UsageSnapshot.self, from: defaults.data(forKey: Keys.snapshot))
+        snapshot = initialSnapshot ?? Self.decode(UsageSnapshot.self, from: defaults.data(forKey: Keys.snapshot))
+        guard startsServices else { return }
+        startDisplayTimer()
         startAutomaticRefresh()
-        refresh()
+        refresh(forceLive: true)
     }
 
     var currentSnapshot: UsageSnapshot? {
-        guard let snapshot else { return nil }
-        guard Date() >= snapshot.resetAt else { return snapshot }
-
-        let windowSeconds = TimeInterval(max(snapshot.windowMinutes, 1) * 60)
-        let elapsed = Date().timeIntervalSince(snapshot.resetAt)
-        let completedWindows = floor(elapsed / windowSeconds) + 1
-        let nextReset = snapshot.resetAt.addingTimeInterval(completedWindows * windowSeconds)
-
-        return UsageSnapshot(
-            usedPercent: 0,
-            resetAt: nextReset,
-            capturedAt: snapshot.capturedAt,
-            windowMinutes: snapshot.windowMinutes,
-            source: "新周期"
-        )
+        snapshot
     }
 
-    var isShowingProjectedReset: Bool {
-        guard let snapshot else { return false }
-        return Date() >= snapshot.resetAt
+    var isAwaitingFreshData: Bool {
+        currentFiveHourWindow == nil
+    }
+
+    var currentFiveHourWindow: UsageWindow? {
+        guard let window = snapshot?.fiveHourWindow, window.resetAt > displayTick else { return nil }
+        return window
+    }
+
+    var currentWeeklyWindow: UsageWindow? {
+        guard let window = snapshot?.weeklyWindow, window.resetAt > displayTick else { return nil }
+        return window
     }
 
     var menuBarText: String {
-        guard let snapshot = currentSnapshot else { return "--" }
-        return "\(Int(snapshot.remainingPercent.rounded()))%"
+        guard let window = currentFiveHourWindow else { return "--%" }
+        return "\(Int(window.remainingPercent.rounded()))%"
+    }
+
+    var isDataStale: Bool {
+        if snapshot != nil && (currentFiveHourWindow == nil || currentWeeklyWindow == nil) { return true }
+        guard let snapshot = currentSnapshot else { return false }
+        return displayTick.timeIntervalSince(snapshot.capturedAt) > 30 * 60
     }
 
     var statusSymbol: String {
-        guard let remaining = currentSnapshot?.remainingPercent else { return "circle.dashed" }
+        guard let remaining = currentFiveHourWindow?.remainingPercent else { return "circle.dashed" }
         switch remaining {
         case ..<10: return "exclamationmark.circle.fill"
         case ..<warningThreshold: return "circle.lefthalf.filled"
@@ -89,19 +97,24 @@ final class UsageStore: ObservableObject {
     }
 
     var footerText: String {
-        if isShowingProjectedReset {
-            return "额度已重置"
-        }
         if let statusMessage, !statusMessage.isEmpty {
             return statusMessage
         }
         guard let snapshot = currentSnapshot else {
             return "等待首次更新"
         }
-        return "已更新 · \(snapshot.capturedAt.formatted(date: .omitted, time: .shortened))"
+        let source = snapshot.source == "Codex 本机状态" ? "Codex 本机" : snapshot.source
+        let updateTime = snapshot.capturedAt.formatted(date: .omitted, time: .shortened)
+        if syncIssue != nil && isDataStale {
+            return "\(source) · \(updateTime) · 等待同步"
+        }
+        if isDataStale {
+            return "\(source) · \(updateTime) 的数据，待更新"
+        }
+        return "\(source) · 更新于 \(updateTime)"
     }
 
-    func refresh() {
+    func refresh(forceLive: Bool = false) {
         guard automaticSync else {
             loadManualSnapshot()
             return
@@ -111,37 +124,56 @@ final class UsageStore: ObservableObject {
         isRefreshing = true
         statusMessage = nil
         Task {
-            let latest = await Task.detached(priority: .utility) {
-                SessionUsageReader.latestWeeklyUsage()
-            }.value
+            var official: UsageSnapshot?
+            do {
+                official = try await liveUsageClient.latestUsage(force: forceLive)
+                syncIssue = nil
+            } catch {
+                syncIssue = (error as? UsageSyncError ?? .unavailable).message
+            }
+            // Avoid repeatedly scanning session files when official data is available.
+            let local: UsageSnapshot?
+            if official == nil {
+                local = await Task.detached(priority: .utility) {
+                    SessionUsageReader.latestUsage()
+                }.value
+            } else {
+                local = nil
+            }
 
             isRefreshing = false
+            // A manual edit made during the query must not be overwritten.
+            guard automaticSync else { return }
+            let previous = snapshot?.source == "手动校准" ? nil : snapshot
+            let latest = [official, local, previous].compactMap { $0 }
+                .max { $0.capturedAt < $1.capturedAt }
             if let latest {
                 apply(latest)
                 statusMessage = nil
             } else {
-                statusMessage = snapshot == nil ? "暂未找到本周用量" : nil
+                statusMessage = syncIssue ?? "暂未找到用量数据"
             }
         }
     }
 
-    func refreshSoon() {
+    func refreshSoon(forceLive: Bool = false) {
         guard automaticSync else { return }
         refreshDebounceTask?.cancel()
         refreshDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(700))
             guard !Task.isCancelled else { return }
-            self?.refresh()
+            self?.refresh(forceLive: forceLive)
         }
     }
 
-    func applyManual(remainingPercent: Double, resetAt: Date) {
+    func applyManual(remainingPercent: Double, resetAt: Date, fiveHourRemaining: Double, fiveHourReset: Date) {
         let manual = UsageSnapshot(
             usedPercent: 100 - remainingPercent,
             resetAt: resetAt,
             capturedAt: Date(),
             windowMinutes: 7 * 24 * 60,
-            source: "手动校准"
+            source: "手动校准",
+            shortWindow: UsageWindow(usedPercent: 100 - fiveHourRemaining, resetAt: fiveHourReset, windowMinutes: 300)
         )
         defaults.set(Self.encode(manual), forKey: Keys.manualSnapshot)
         apply(manual)
@@ -214,6 +246,16 @@ final class UsageStore: ObservableObject {
         sessionUsageWatcher?.start()
     }
 
+    private func startDisplayTimer() {
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.displayTick = Date()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        displayTimer = timer
+    }
+
     private func stopAutomaticRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil
@@ -221,9 +263,11 @@ final class UsageStore: ObservableObject {
         refreshDebounceTask = nil
         sessionUsageWatcher?.stop()
         sessionUsageWatcher = nil
+        Task { await liveUsageClient.stop() }
     }
 
     private func apply(_ newSnapshot: UsageSnapshot) {
+        displayTick = Date()
         snapshot = newSnapshot
         defaults.set(Self.encode(newSnapshot), forKey: Keys.snapshot)
         checkLowUsageNotification()
@@ -246,18 +290,20 @@ final class UsageStore: ObservableObject {
     }
 
     private func checkLowUsageNotification() {
-        guard let snapshot = currentSnapshot,
-              snapshot.remainingPercent <= warningThreshold,
-              lastNotifiedResetAt != snapshot.resetAt else { return }
+        guard let window = currentFiveHourWindow,
+              let snapshot,
+              displayTick.timeIntervalSince(snapshot.capturedAt) <= 30 * 60,
+              window.remainingPercent <= warningThreshold,
+              lastNotifiedResetAt != window.resetAt else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "本周用量即将用完"
-        content.body = "当前剩余 \(Int(snapshot.remainingPercent.rounded()))%，请合理安排接下来的使用。"
+        content.title = "5 小时用量即将用完"
+        content.body = "5 小时额度剩余 \(Int(window.remainingPercent.rounded()))%。"
         content.sound = .default
-        let request = UNNotificationRequest(identifier: "quota-low-\(snapshot.resetAt.timeIntervalSince1970)", content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: "quota-five-hour-low-\(window.resetAt.timeIntervalSince1970)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
-        lastNotifiedResetAt = snapshot.resetAt
-        defaults.set(snapshot.resetAt, forKey: Keys.lastNotifiedResetAt)
+        lastNotifiedResetAt = window.resetAt
+        defaults.set(window.resetAt, forKey: Keys.lastNotifiedResetAt)
     }
 
     private static func encode<T: Encodable>(_ value: T) -> Data? {

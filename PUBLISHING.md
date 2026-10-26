@@ -1,49 +1,27 @@
-# Publishing
+# Publishing an update
 
-This file records the release flow for QuotaBar.
+QuotaBar is an existing repository. Update its source first, then publish a release from that updated commit. Do not recreate the repository or replace an older release.
 
-## First GitHub Upload
+## Source update
 
-1. Create a GitHub repository named `QuotaBar`.
-2. Keep the repository private first if you want to review the project before making it public.
-3. Add the remote:
+1. Review the local changes and build the app.
+2. Push the prepared commit, or use GitHub's **Add file → Upload files** to upload the prepared source-update contents to the existing repository. Preserve `Sources/QuotaBar/` and `Tests/` paths; do not upload an enclosing source-update folder.
+3. Confirm the default branch contains the new five-hour menu bar behavior and `CHANGELOG.md` entry before creating the release tag.
 
-```sh
-git remote add origin git@github.com:<owner>/QuotaBar.git
-```
+Do not upload `.git`, `.build`, local Codex session data, or credentials. App binaries belong in Release assets rather than the source tree.
 
-or, for HTTPS:
+## Release
 
-```sh
-git remote add origin https://github.com/<owner>/QuotaBar.git
-```
+1. Verify the latest published version and the availability of the proposed new tag.
+2. Create the new tag on the updated source commit.
+3. Set the release title to `QuotaBar v<version>` and paste the prepared release notes.
+4. Attach the app ZIP and `SHA256SUMS.txt`; never reuse an archive built before the latest changes.
+5. Verify the published tag, source version, download filename, and checksum agree.
 
-4. Push the first commit:
+The app is locally ad-hoc signed, not Developer ID signed or notarized. Identify the supported CPU architecture in the download filename. GUI checks on the target Mac are required before calling a release fully verified.
 
-```sh
-git push -u origin main
-```
+## Repository description
 
-## Release Checklist
+Native macOS menu bar utility showing five-hour remaining Codex usage, with five-hour and weekly quotas side by side.
 
-- Run `swift build -c release`.
-- Run `./build-app.sh`.
-- Confirm `QuotaBar.app` launches locally.
-- Create a GitHub release tag, for example `v1.0.0`.
-- Attach a signed or locally built app archive only if you want downloadable binaries.
-
-## Suggested Repository Description
-
-Native macOS menu bar utility for showing remaining weekly ChatGPT/Codex usage.
-
-## Suggested Topics
-
-```text
-macos
-swift
-swiftui
-menubar
-chatgpt
-codex
-productivity
-```
+Suggested topics: `macos`, `swift`, `swiftui`, `menubar`, `codex`, `productivity`.

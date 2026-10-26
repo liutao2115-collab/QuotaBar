@@ -10,45 +10,37 @@ enum SessionUsageReader {
         let resetAt: Date
     }
 
-    static func latestWeeklyUsage() -> UsageSnapshot? {
-        var recentFiles: [(url: URL, modified: Date)] = []
+    static func latestUsage(in directory: URL = sessionsDirectoryURL) -> UsageSnapshot? {
+        let recentFiles = recentSessionFiles(in: directory)
 
-        // A weekly allowance cannot be affected by sessions older than two weeks.
-        // Restricting the scan keeps the menu bar utility quiet even after years of use.
-        let calendar = Calendar(identifier: .gregorian)
-        for dayOffset in 0...14 {
-            guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: Date()) else { continue }
-            let components = calendar.dateComponents([.year, .month, .day], from: date)
-            guard let year = components.year,
-                  let month = components.month,
-                  let day = components.day else { continue }
-
-            let dayURL = sessionsDirectoryURL
-                .appendingPathComponent(String(format: "%04d", year), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", month), isDirectory: true)
-                .appendingPathComponent(String(format: "%02d", day), isDirectory: true)
-
-            let files = (try? FileManager.default.contentsOfDirectory(
-                at: dayURL,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-
-            for url in files where url.pathExtension == "jsonl" {
-                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                      values.isRegularFile == true else { continue }
-                recentFiles.append((url, values.contentModificationDate ?? .distantPast))
+        return recentFiles
+            .prefix(160)
+            .compactMap { file in
+                readLatestSnapshot(from: file.url, modifiedAt: file.modified)
             }
+            .max(by: { $0.capturedAt < $1.capturedAt })
+    }
+
+    private static func recentSessionFiles(in directory: URL) -> [(url: URL, modified: Date)] {
+        let cutoff = Date().addingTimeInterval(-14 * 24 * 60 * 60)
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var files: [(url: URL, modified: Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate,
+                  modified >= cutoff else { continue }
+
+            files.append((url, modified))
         }
 
-        recentFiles.sort { $0.modified > $1.modified }
-
-        for file in recentFiles.prefix(80) {
-            if let snapshot = readLatestSnapshot(from: file.url, modifiedAt: file.modified) {
-                return snapshot
-            }
-        }
-        return nil
+        return files.sorted { $0.modified > $1.modified }
     }
 
     private static func readLatestSnapshot(from url: URL, modifiedAt: Date) -> UsageSnapshot? {
@@ -68,22 +60,32 @@ enum SessionUsageReader {
                   let payload = object["payload"] as? [String: Any],
                   let limits = payload["rate_limits"] as? [String: Any] else { continue }
 
+            let capturedAt = (object["timestamp"] as? String).flatMap(Self.isoDate) ?? modifiedAt
             let candidates = ["primary", "secondary", "individual_limit"].compactMap {
                 windowCandidate(from: limits[$0])
             }
 
-            // Codex normally reports a five-hour and a seven-day window. The largest
-            // window is the weekly allowance the menu bar is intended to show.
-            guard let weekly = candidates
+            // Identify windows by duration, independently of primary/secondary order.
+            let weekly = candidates
                 .filter({ $0.windowMinutes >= 6 * 24 * 60 })
-                .max(by: { $0.windowMinutes < $1.windowMinutes }) else { continue }
+                .max(by: { $0.windowMinutes < $1.windowMinutes })
+            let shortWindow = candidates
+                .first { $0.windowMinutes == 300 }
+            guard let baseWindow = weekly ?? shortWindow else { continue }
 
             return UsageSnapshot(
-                usedPercent: weekly.usedPercent,
-                resetAt: weekly.resetAt,
-                capturedAt: modifiedAt,
-                windowMinutes: weekly.windowMinutes,
-                source: "Codex 本机状态"
+                usedPercent: baseWindow.usedPercent,
+                resetAt: baseWindow.resetAt,
+                capturedAt: capturedAt,
+                windowMinutes: baseWindow.windowMinutes,
+                source: "Codex 本机",
+                shortWindow: shortWindow.map {
+                    UsageWindow(
+                        usedPercent: $0.usedPercent,
+                        resetAt: $0.resetAt,
+                        windowMinutes: $0.windowMinutes
+                    )
+                }
             )
         }
         return nil
@@ -106,5 +108,11 @@ enum SessionUsageReader {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
         return nil
+    }
+
+    private static func isoDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }
